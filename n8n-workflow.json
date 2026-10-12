@@ -1,0 +1,186 @@
+{
+  "name": "CRM Follow-up Automation (AI Automation Projects #10)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 7 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "26b356f5-8ba9-501c-8dfb-3e45f1ccaa8a",
+      "name": "Schedule (weekdays 7:30am)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "options": {}
+      },
+      "id": "1f9540db-606f-52cf-ba49-3e58124f681d",
+      "name": "Read deals (CRM export sheet)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b150a80f-f219-5d21-a6d7-ae3866d361ee",
+      "name": "Test with sample data",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sample data from this repo. Click 'Test workflow' to run the whole flow on it.\nconst sample = [\n {\n  \"deal\": \"D1\",\n  \"company\": \"Bright Schools\",\n  \"contact\": \"Mrs Ade\",\n  \"owner\": \"Kemi\",\n  \"stage\": \"proposal sent\",\n  \"value\": \"2500000\",\n  \"last_contact\": \"2026-09-28\",\n  \"topic\": \"AI staff training\",\n  \"last_note\": \"asked for payment plan options\"\n },\n {\n  \"deal\": \"D2\",\n  \"company\": \"Kola Foods\",\n  \"contact\": \"Kola\",\n  \"owner\": \"Kemi\",\n  \"stage\": \"new lead\",\n  \"value\": \"400000\",\n  \"last_contact\": \"2026-10-08\",\n  \"topic\": \"WhatsApp ordering bot\",\n  \"last_note\": \"enquired via Instagram\"\n },\n {\n  \"deal\": \"D3\",\n  \"company\": \"Zenith Clinics\",\n  \"contact\": \"Dr Musa\",\n  \"owner\": \"Tunde\",\n  \"stage\": \"negotiation\",\n  \"value\": \"4200000\",\n  \"last_contact\": \"2026-10-02\",\n  \"topic\": \"patient reminder system\",\n  \"last_note\": \"wants a 10% discount\"\n },\n {\n  \"deal\": \"D4\",\n  \"company\": \"Harbour Traders\",\n  \"contact\": \"Mr Obi\",\n  \"owner\": \"Tunde\",\n  \"stage\": \"discovery call\",\n  \"value\": \"900000\",\n  \"last_contact\": \"2026-09-30\",\n  \"topic\": \"inventory alerts\",\n  \"last_note\": \"uses Excel today\"\n },\n {\n  \"deal\": \"D5\",\n  \"company\": \"Prime Realty\",\n  \"contact\": \"Ada\",\n  \"owner\": \"Kemi\",\n  \"stage\": \"closed won\",\n  \"value\": \"3000000\",\n  \"last_contact\": \"2026-09-15\",\n  \"topic\": \"lead bot\",\n  \"last_note\": \"signed\"\n },\n {\n  \"deal\": \"D6\",\n  \"company\": \"Delta Events\",\n  \"contact\": \"Ese\",\n  \"owner\": \"Tunde\",\n  \"stage\": \"new lead\",\n  \"value\": \"250000\",\n  \"last_contact\": \"2026-10-01\",\n  \"topic\": \"event registration automation\",\n  \"last_note\": \"filled web form\"\n }\n];\nreturn sample.map(json => ({ json }));"
+      },
+      "id": "6968613e-c19b-52e6-bb2c-f525313fc51a",
+      "name": "Sample data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// CRM Follow-up Automation: core logic (ported from main.py)\n\n// ---- input normaliser (works for Webhook, Form, WhatsApp, Gmail, Sheets and sample data)\nconst input = $input.all().flatMap(i => {\n  const j = i.json || {};\n  if (j.messages && Array.isArray(j.messages)) {           // WhatsApp Trigger\n    return j.messages.filter(m => m.text).map(m => ({ from: '+' + m.from, text: m.text.body }));\n  }\n  if (j.Subject !== undefined || j.From !== undefined) {     // Gmail Trigger (simple)\n    return [{ from: (j.From || '').replace(/.*<|>.*/g, ''), subject: j.Subject || '', body: j.snippet || j.text || '' }];\n  }\n  const b = (j.body !== undefined && j.headers !== undefined) ? j.body : j;   // Webhook wraps payload in body\n  if (Array.isArray(b)) return b;\n  if (b && Array.isArray(b.items)) return b.items;\n  return [b];\n});\n\nconst STALE = { 'new lead': 2, 'discovery call': 4, 'proposal sent': 5, 'negotiation': 3 };\nconst TPL = { 'new lead': 'Hi {c}, following up on your enquiry about {t}. When is a good time for a quick call?',\n  'discovery call': 'Hi {c}, great speaking with you. Here are next steps on {t}. Shall I send a proposal?',\n  'proposal sent': 'Hi {c}, checking you received the proposal for {t}. Happy to walk through it or adjust scope.',\n  'negotiation': 'Hi {c}, I wanted to close the loop on {t}. Is anything blocking a decision this week?' };\nconst today = new Date(); today.setHours(0, 0, 0, 0);\nconst stale = [];\nfor (const d of input) {\n  const st = (d.stage || '').toLowerCase(); if (!(st in STALE)) continue;\n  const silent = Math.round((today - new Date(d.last_contact + 'T00:00:00')) / 864e5);\n  if (silent > STALE[st]) stale.push({ ...d, silent, priority: Number(d.value) * silent,\n    draft: TPL[st].replace('{c}', d.contact).replace('{t}', d.topic) });\n}\nstale.sort((a, b) => b.priority - a.priority);\nconst reps = {};\nfor (const d of stale) (reps[d.owner] = reps[d.owner] || []).push(d);\nreturn Object.entries(reps).map(([rep, ds]) => ({ json: { rep, email: rep.toLowerCase() + '@yourcompany.com', count: ds.length,\n  digest: ds.map(d => `${d.company} (${d.stage}, NGN ${Number(d.value).toLocaleString()}, silent ${d.silent} days)\\nLast note: ${d.last_note}\\nDraft: ${d.draft}`).join('\\n\\n') } }));\n"
+      },
+      "id": "9047ce7d-9369-542d-bcb4-9044804d05a6",
+      "name": "Logic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.count }} deals to chase today",
+        "emailType": "text",
+        "message": "={{ $json.digest }}",
+        "options": {}
+      },
+      "id": "eca25c41-9669-5648-9c53-47ad8e573e33",
+      "name": "Email each rep their follow-ups",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        120
+      ],
+      "webhookId": "eca25c41-9669-5648-9c53-47ad8e573e33"
+    },
+    {
+      "parameters": {
+        "content": "## CRM Follow-up Automation\nFinds the deals going quiet and drafts the follow-up before they die.\n\nEach weekday morning it reads your deals sheet (deal, company, contact, owner, stage, value, last_contact, topic, last_note), finds deals that have gone quiet for their stage, ranks them by value x days silent, and emails each rep their list with drafted follow-ups.\n\n**Try it:** click *Test workflow* to run on the sample data. Then connect your credentials on the output nodes and activate.\n\nCode and docs: github.com/Princewill106/crm-followup-automation",
+        "height": 340,
+        "width": 420,
+        "color": 5
+      },
+      "id": "858d0c23-ffa9-5ce6-81a3-e6665ba1a8b2",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -460
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule (weekdays 7:30am)": {
+      "main": [
+        [
+          {
+            "node": "Read deals (CRM export sheet)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test with sample data": {
+      "main": [
+        [
+          {
+            "node": "Sample data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read deals (CRM export sheet)": {
+      "main": [
+        [
+          {
+            "node": "Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample data": {
+      "main": [
+        [
+          {
+            "node": "Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Logic": {
+      "main": [
+        [
+          {
+            "node": "Email each rep their follow-ups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
